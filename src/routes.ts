@@ -95,5 +95,92 @@ export async function appRoutes(app: FastifyInstance) {
         }
 
     })
+
+    app.patch('/habits/:id/toggle', async (request) => {
+        //check / uncheck an habit
+
+        const queryParams = z.object({
+            id: z.string().uuid()
+        })
+
+        const { id } = queryParams.parse(request.params)
+
+        const today = dayjs().startOf('day').toDate()
+        //if we wanted people to be able to change the check from previous days, we must get the day that the person wants to change. Maybe in the habits route.
+
+        let day = await prisma.day.findUnique({
+            where: {
+                date: today
+            }
+        })
+
+        //Since we only create an entry on the day table IF there's at least one habit completed on that day, we need to create it if it's the first habit the user is checking:
+        if (!day) {
+            day = await prisma.day.create({
+                data: {
+                    date: today
+                }
+            })
+        }
+
+        const dayHabit = await prisma.dayHabit.findUnique({
+            where: {
+                day_id_habit_id: {
+                    day_id: day.id,
+                    habit_id: id
+                }
+            }
+        })
+        //the relation of day_id and habit_id is possible because of the @@unique on the schemas
+
+        //deletes the habit completed on that day if its already checked as done. (the toggle property)
+        if (dayHabit) {
+            await prisma.dayHabit.delete({
+                where: {
+                    id: dayHabit.id
+                }
+            })
+        } else {
+            await prisma.dayHabit.create({
+                data: {
+                    day_id: day.id,
+                    habit_id: id
+                }
+            })
+        }
+
+    })
+
+    app.get('/summary', async () => {
+        //get [{}, {}, {date: 13/04, possibleHabits: 5, completed: 1}, {}]
+        //since this query is a bit complex, using prisma would be less optimized and might affect performance some time. So we use the raw SQL query
+
+        //Queries between () are called subquerries. Could've been done with JOIN
+        //The cast is needed because prisma doesnt know how to handle BigInt format (wich is the one returned from COUNT)
+
+        //strftime is a SQLite function to work with dates. The %w is to get the week day from D.Date. The division by 1000 is because SQlite uses de unixepoch date format, but
+        //with the miliseconds, so it adds three 0's at the end.
+
+        const summary = prisma.$queryRaw`
+        SELECT D.id, D.date,
+        (
+            SELECT cast(COUNT (*) as float) 
+            FROM day_habits DH
+            WHERE DH.day_id = D.id
+        ) as completed,
+        (
+            SELECT cast(COUNT (*) as float) 
+            FROM habit_week_days HWD
+            JOIN habits H 
+                ON H.id = HWD.habit_id
+            WHERE HWD.week_day = cast(strftime('%w', D.Date/1000.0, 'unixepoch') as int)
+            AND H.created_at <= D.date
+        ) as amount       
+            
+        FROM days D    
+        `
+
+        return summary
+    })
 }
 
